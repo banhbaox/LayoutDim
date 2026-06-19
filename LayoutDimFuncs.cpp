@@ -166,7 +166,7 @@ int DimLayout()
     CKSCoord ckscBase;
     double dScale = 0, dRot = 0, dW = 0, dH = 0;
     bool bFrozen = false, bBorder = false;
-    CKS::Rendering ucRender = CKS::RenderWireFrame;
+    CKS::Rendering ucRender = CKS::RenderWire;
     std::wstring viewName;
     part.GetInstAttributes(drawInst, ckscBase, dScale, dRot, dW, dH,
                            bFrozen, bBorder, ucRender, NULL, NULL, NULL,
