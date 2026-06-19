@@ -27,12 +27,12 @@ static bool IsOnTubeGeoLevel(CKPart& part, CKSEntity& ent)
     return num == kTubeGeoLevelNum;
     }
 
-// GetLine/GetArc with &drawInst return layout sheet-space coords, which is what
-// CKS::Location coords (m_ptCoord) and CKSRefLine expect when pMatrix = global CPlane.
-// Pass pRefLine so KC derives the aligned angle from the refLine direction rather than
-// defaulting to 0 deg (horizontal) when pRefLine is NULL.
+// GetLine/GetArc with &drawInst return layout sheet-space coords.
+// nDispView = 0 keeps the dim on the layout sheet (sheet-space); using the actual
+// display view number tells KC to place the dim in 3D model space, which mismatches
+// the sheet-space coords from GetLine(&drawInst) and puts the dim far off-screen.
 static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
-                    int nDispView, const CKSMatrix& cplaneMat, CKSDimensionOptions& opts)
+                    const CKSMatrix& cplaneMat, CKSDimensionOptions& opts)
     {
     CKSCoord ptStart, ptEnd;
     if(part.GetLine(ent, &drawInst, ptStart, ptEnd) != CK_NOERROR) return;
@@ -42,10 +42,7 @@ static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     double projLen = sqrt(dx*dx + dy*dy);
     if(projLen < 1e-10) return;
 
-    // pRefLine tells AddLinearDim to align the dim parallel to this line direction
-    CKSRefLine refLine;
-    refLine.m_ptStart = ptStart;
-    refLine.m_ptEnd   = ptEnd;
+    double dAxisAngle = atan2(dy, dx) * 180.0 / M_PI;
 
     CKSCoord textPt(
         (ptStart.m_dX + ptEnd.m_dX) * 0.5 + (-dy / projLen) * kDimOffset,
@@ -55,12 +52,12 @@ static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     CKS::LocationPtr locFirst  = new CKS::EndEntLoc(ptStart, ent, drawInst, true,  1);
     CKS::LocationPtr locSecond = new CKS::EndEntLoc(ptEnd,   ent, drawInst, false, 1);
     CKS::LocationPtr textLoc   = new CKS::Location(textPt);
-    part.AddLinearDim(0.0, &refLine, locFirst, locSecond,
-                      textLoc, &opts, nDispView, NULL, &cplaneMat);
+    part.AddLinearDim(dAxisAngle, NULL, locFirst, locSecond,
+                      textLoc, &opts, 0, NULL, &cplaneMat);
     }
 
 static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
-                   int nDispView, const CKSMatrix& cplaneMat, CKSDimensionOptions& opts)
+                   const CKSMatrix& cplaneMat, CKSDimensionOptions& opts)
     {
     double dRad, dStartAng, dDeltaAng; CKEntityAttrib arcAttrib; CKSMatrix arcMatrix;
     if(part.GetArc(ent, &drawInst, &dRad, &dStartAng, &dDeltaAng,
@@ -83,7 +80,7 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
         center.m_dY + sin(midAng) * dRad * 1.5,
         center.m_dZ);
     CKS::LocationPtr textLoc = new CKS::Location(textPt);
-    part.AddCircularDim(refArc, &ent, textLoc, nDispView, &opts, NULL, NULL, &drawInst);
+    part.AddCircularDim(refArc, &ent, textLoc, 0, &opts, NULL, NULL, &drawInst);
     }
 
 int DimLayout()
@@ -165,9 +162,9 @@ int DimLayout()
     CKSDimensionOptions circOpts; part.GetActiveAttrib(circOpts, CKMaskCircularDim);
     circOpts.m_Lines.SetDisplayStyle(UCHAR(CK_RadialCircular));
 
-    if(lineAtT1.IsValid()) DimLine(part, lineAtT1, drawInst, nDispView, cplaneMat, linOpts);
-    DimArc(part, selEntity, drawInst, nDispView, cplaneMat, circOpts);
-    if(lineAtT2.IsValid()) DimLine(part, lineAtT2, drawInst, nDispView, cplaneMat, linOpts);
+    if(lineAtT1.IsValid()) DimLine(part, lineAtT1, drawInst, cplaneMat, linOpts);
+    DimArc(part, selEntity, drawInst, cplaneMat, circOpts);
+    if(lineAtT2.IsValid()) DimLine(part, lineAtT2, drawInst, cplaneMat, linOpts);
 
     part.NoteState();
     return CKNoError;
