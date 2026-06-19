@@ -24,6 +24,8 @@ static bool GetEntityLevelNumber(CKPart& part, CKSEntity& ent, std::wstring& out
     return true;
     }
 
+// CKS::Location and derived classes have protected destructors — they are
+// GAtom reference-counted objects and must live on the heap via LocationPtr.
 static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
                     int nDispView, const CKSMatrix& matCPlane,
                     CKSDimensionOptions& opts)
@@ -32,7 +34,7 @@ static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     if(part.GetLine(ent, &drawInst, ptStart, ptEnd) != CK_NOERROR)
         return;
 
-    // Direction of the segment in XY (view) plane
+    // Direction of the segment projected into XY
     double dx = ptEnd.m_dX - ptStart.m_dX;
     double dy = ptEnd.m_dY - ptStart.m_dY;
     double projLen = sqrt(dx * dx + dy * dy);
@@ -50,12 +52,12 @@ static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
         (ptStart.m_dY + ptEnd.m_dY) * 0.5 + perpY,
         (ptStart.m_dZ + ptEnd.m_dZ) * 0.5);
 
-    CKS::EndEntLoc locFirst (ptStart, ent, drawInst, true,  1);
-    CKS::EndEntLoc locSecond(ptEnd,   ent, drawInst, false, 1);
-    CKS::Location  textLoc(textPt);
+    CKS::LocationPtr locFirst  = new CKS::EndEntLoc(ptStart, ent, drawInst, true,  1);
+    CKS::LocationPtr locSecond = new CKS::EndEntLoc(ptEnd,   ent, drawInst, false, 1);
+    CKS::LocationPtr textLoc   = new CKS::Location(textPt);
 
-    part.AddLinearDim(dAxisAngle, NULL, &locFirst, &locSecond,
-                      &textLoc, &opts, nDispView, NULL, &matCPlane);
+    part.AddLinearDim(dAxisAngle, NULL, locFirst, locSecond,
+                      textLoc, &opts, nDispView, NULL, &matCPlane);
     }
 
 static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
@@ -85,9 +87,9 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
         center.m_dX + cos(midAngRad) * dRad * 1.5,
         center.m_dY + sin(midAngRad) * dRad * 1.5,
         center.m_dZ);
-    CKS::Location textLoc(textPt);
+    CKS::LocationPtr textLoc = new CKS::Location(textPt);
 
-    part.AddCircularDim(refArc, &ent, &textLoc, nDispView, &opts,
+    part.AddCircularDim(refArc, &ent, textLoc, nDispView, &opts,
                         NULL, NULL, &drawInst);
     }
 
