@@ -27,65 +27,48 @@ static bool IsOnTubeGeoLevel(CKPart& part, CKSEntity& ent)
     return num == kTubeGeoLevelNum;
     }
 
-// Project 3D world-space point into view-local 2D (u along X-axis, v along Y-axis).
-// vm is GetValues() output: row 0 = X axis, row 1 = Y axis, row 3 = origin.
-static void WorldToView2D(const CKSCoord& pt, const double vm[4][4], double& u, double& v)
-    {
-    double dx = pt.m_dX - vm[3][0], dy = pt.m_dY - vm[3][1], dz = pt.m_dZ - vm[3][2];
-    u = dx*vm[0][0] + dy*vm[0][1] + dz*vm[0][2];
-    v = dx*vm[1][0] + dy*vm[1][1] + dz*vm[1][2];
-    }
-
-// Convert view-local 2D (u, v) back to 3D world space.
-static CKSCoord View2DToWorld(double u, double v, const double vm[4][4])
-    {
-    return CKSCoord(
-        vm[3][0] + u*vm[0][0] + v*vm[1][0],
-        vm[3][1] + u*vm[0][1] + v*vm[1][1],
-        vm[3][2] + u*vm[0][2] + v*vm[1][2]);
-    }
-
+// GetLine/GetArc with &drawInst return layout sheet-space coords, which is what
+// CKS::Location coords (m_ptCoord) and CKSRefLine expect when pMatrix = global CPlane.
+// Pass pRefLine so KC derives the aligned angle from the refLine direction rather than
+// defaulting to 0 deg (horizontal) when pRefLine is NULL.
 static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
-                    int nDispView, const CKSMatrix& viewMat, CKSDimensionOptions& opts)
+                    int nDispView, const CKSMatrix& cplaneMat, CKSDimensionOptions& opts)
     {
-    // 3D world-space endpoints
     CKSCoord ptStart, ptEnd;
-    if(part.GetLine(ent, NULL, ptStart, ptEnd) != CK_NOERROR) return;
+    if(part.GetLine(ent, &drawInst, ptStart, ptEnd) != CK_NOERROR) return;
 
-    // Project to view-local 2D to get the angle as it appears in the display view
-    double vm[4][4]; viewMat.GetValues(vm);
-    double u1, v1, u2, v2;
-    WorldToView2D(ptStart, vm, u1, v1);
-    WorldToView2D(ptEnd,   vm, u2, v2);
-    double du = u2-u1, dv = v2-v1;
-    double len2D = sqrt(du*du + dv*dv);
-    if(len2D < 1e-10) return;
+    double dx = ptEnd.m_dX - ptStart.m_dX;
+    double dy = ptEnd.m_dY - ptStart.m_dY;
+    double projLen = sqrt(dx*dx + dy*dy);
+    if(projLen < 1e-10) return;
 
-    double dAxisAngle = atan2(dv, du) * 180.0 / M_PI;
+    // pRefLine tells AddLinearDim to align the dim parallel to this line direction
+    CKSRefLine refLine;
+    refLine.m_ptStart = ptStart;
+    refLine.m_ptEnd   = ptEnd;
 
-    // Offset text perpendicularly to the line in view-local space, then back to 3D
-    double uT = (u1+u2)*0.5 + (-dv/len2D)*kDimOffset;
-    double vT = (v1+v2)*0.5 + ( du/len2D)*kDimOffset;
-    CKSCoord textPt = View2DToWorld(uT, vT, vm);
+    CKSCoord textPt(
+        (ptStart.m_dX + ptEnd.m_dX) * 0.5 + (-dy / projLen) * kDimOffset,
+        (ptStart.m_dY + ptEnd.m_dY) * 0.5 + ( dx / projLen) * kDimOffset,
+        (ptStart.m_dZ + ptEnd.m_dZ) * 0.5);
 
     CKS::LocationPtr locFirst  = new CKS::EndEntLoc(ptStart, ent, drawInst, true,  1);
     CKS::LocationPtr locSecond = new CKS::EndEntLoc(ptEnd,   ent, drawInst, false, 1);
     CKS::LocationPtr textLoc   = new CKS::Location(textPt);
-    part.AddLinearDim(dAxisAngle, NULL, locFirst, locSecond,
-                      textLoc, &opts, nDispView, NULL, &viewMat);
+    part.AddLinearDim(0.0, &refLine, locFirst, locSecond,
+                      textLoc, &opts, nDispView, NULL, &cplaneMat);
     }
 
 static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
-                   int nDispView, const CKSMatrix& viewMat, CKSDimensionOptions& opts)
+                   int nDispView, const CKSMatrix& cplaneMat, CKSDimensionOptions& opts)
     {
     double dRad, dStartAng, dDeltaAng; CKEntityAttrib arcAttrib; CKSMatrix arcMatrix;
-    if(part.GetArc(ent, &drawInst, &dRad, &dStartAng, &dDeltaAng, &arcAttrib, &arcMatrix) != CK_NOERROR)
+    if(part.GetArc(ent, &drawInst, &dRad, &dStartAng, &dDeltaAng,
+                   &arcAttrib, &arcMatrix) != CK_NOERROR)
         return;
 
     double vals[4][4]; arcMatrix.GetValues(vals);
     CKSCoord center(vals[3][0], vals[3][1], vals[3][2]);
-    CKSCoord xAx(vals[0][0], vals[0][1], vals[0][2]);
-    CKSCoord yAx(vals[1][0], vals[1][1], vals[1][2]);
 
     CKSRefArc refArc;
     refArc.m_dRadius     = dRad;
@@ -93,21 +76,12 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     refArc.m_dEndAngle   = dStartAng + dDeltaAng;
     refArc.m_ptCenter    = center;
 
-    // Mid-arc point in 3D, then offset further outward in view-local space
+    // Text at mid-arc, offset outward (all in sheet-space coords from GetArc(&drawInst))
     double midAng = dStartAng + dDeltaAng * 0.5;
-    CKSCoord midOnArc(
-        center.m_dX + dRad*(cos(midAng)*xAx.m_dX + sin(midAng)*yAx.m_dX),
-        center.m_dY + dRad*(cos(midAng)*xAx.m_dY + sin(midAng)*yAx.m_dY),
-        center.m_dZ + dRad*(cos(midAng)*xAx.m_dZ + sin(midAng)*yAx.m_dZ));
-
-    double vm[4][4]; viewMat.GetValues(vm);
-    double uM, vM, uC, vC;
-    WorldToView2D(midOnArc, vm, uM, vM);
-    WorldToView2D(center,   vm, uC, vC);
-    double rdu = uM-uC, rdv = vM-vC, rlen = sqrt(rdu*rdu + rdv*rdv);
-    if(rlen < 1e-10) rlen = 1.0;
-    CKSCoord textPt = View2DToWorld(uM+(rdu/rlen)*kDimOffset, vM+(rdv/rlen)*kDimOffset, vm);
-
+    CKSCoord textPt(
+        center.m_dX + cos(midAng) * dRad * 1.5,
+        center.m_dY + sin(midAng) * dRad * 1.5,
+        center.m_dZ);
     CKS::LocationPtr textLoc = new CKS::Location(textPt);
     part.AddCircularDim(refArc, &ent, textLoc, nDispView, &opts, NULL, NULL, &drawInst);
     }
@@ -136,7 +110,6 @@ int DimLayout()
     // TubeMaker encodes entity IDs in the view name: "Bend#:leftLineId,arcId,rightLineId"
     ULONG arcId = part.GetID(selEntity);
     int nDispView = -1;
-    CKSMatrix viewMat;
     for(int n = 1; n <= 500; ++n)
         {
         std::wstring vname;
@@ -146,8 +119,7 @@ int DimLayout()
         size_t c1 = ids.find(L','); if(c1 == std::wstring::npos) continue;
         size_t c2 = ids.find(L',', c1+1); if(c2 == std::wstring::npos) continue;
         ULONG vid = (ULONG)wcstoul(ids.substr(c1+1, c2-c1-1).c_str(), nullptr, 10);
-        if(vid == arcId)
-            { nDispView = n; part.GetDispView(n, viewMat); break; }
+        if(vid == arcId) { nDispView = n; break; }
         }
     if(nDispView < 0)
         { AfxMessageBox(L"Arc not found in a TubeMaker bend view. Run TubeMaker first."); return CKNoError; }
@@ -163,7 +135,7 @@ int DimLayout()
         CKMaskTypes t; if(part.GetEntityType(ent,t)==CK_NOERROR && t==CKMaskLine) lines.push_back(ent);
         }
 
-    // Arc tangent endpoints in 3D world space
+    // Arc tangent endpoints in 3D world space (NULL = model coords) for line matching
     double dRad, dStartAng, dDeltaAng; CKEntityAttrib arcAttr; CKSMatrix arcMat;
     if(part.GetArc(selEntity, NULL, &dRad, &dStartAng, &dDeltaAng, &arcAttr, &arcMat) != CK_NOERROR)
         { AfxMessageBox(L"Failed to retrieve arc geometry."); return CKError; }
@@ -188,13 +160,14 @@ int DimLayout()
         if(!lineAtT2.IsValid() && (Dist3D(ls,T2)<kEndpointTol || Dist3D(le,T2)<kEndpointTol)) lineAtT2=lines[i];
         }
 
+    CKSMatrix cplaneMat; part.GetActiveCPlaneMatrix(cplaneMat);
     CKSDimensionOptions linOpts; part.GetActiveAttrib(linOpts, CKMaskLinearDim);
     CKSDimensionOptions circOpts; part.GetActiveAttrib(circOpts, CKMaskCircularDim);
     circOpts.m_Lines.SetDisplayStyle(UCHAR(CK_RadialCircular));
 
-    if(lineAtT1.IsValid()) DimLine(part, lineAtT1, drawInst, nDispView, viewMat, linOpts);
-    DimArc(part, selEntity, drawInst, nDispView, viewMat, circOpts);
-    if(lineAtT2.IsValid()) DimLine(part, lineAtT2, drawInst, nDispView, viewMat, linOpts);
+    if(lineAtT1.IsValid()) DimLine(part, lineAtT1, drawInst, nDispView, cplaneMat, linOpts);
+    DimArc(part, selEntity, drawInst, nDispView, cplaneMat, circOpts);
+    if(lineAtT2.IsValid()) DimLine(part, lineAtT2, drawInst, nDispView, cplaneMat, linOpts);
 
     part.NoteState();
     return CKNoError;
