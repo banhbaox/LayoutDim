@@ -8,24 +8,39 @@
 #include "ck_attr.h"
 #include "Funcs.h"
 
-// Level number string for TubeGeo entities (matches TubeMaker level 2.1)
+// Fallback level number string for TubeGeo entities
 static const std::wstring kTubeGeoLevelNum = L"2.1";
 
-// Fixed offset used to place dimension text away from the entity
+// Text offset distance from the entity
 static const double kDimOffset = 25.0;
 
-static bool GetEntityLevelNumber(CKPart& part, CKSEntity& ent, std::wstring& outNum)
+// Parse a TubeMaker bend view name of the form "BendN:leftLineId,arcId,rightLineId".
+// Returns true and fills the three IDs on success.
+static bool ParseBendViewName(const std::wstring& name,
+                              ULONG& leftId, ULONG& arcId, ULONG& rightId)
     {
-    CKSLevel level;
-    if(part.GetEntityLevel(ent, level) != CK_NOERROR || !level.IsValid())
+    size_t colon = name.find(L':');
+    if(colon == std::wstring::npos)
         return false;
-    if(part.GetLevelInfo(level, NULL, &outNum, NULL, NULL, NULL) != CK_NOERROR)
+
+    std::wstring ids = name.substr(colon + 1);
+    size_t c1 = ids.find(L',');
+    if(c1 == std::wstring::npos)
         return false;
-    return true;
+    size_t c2 = ids.find(L',', c1 + 1);
+    if(c2 == std::wstring::npos)
+        return false;
+
+    wchar_t* end = nullptr;
+    leftId = wcstoul(ids.substr(0, c1).c_str(),       nullptr, 10);
+    arcId  = wcstoul(ids.substr(c1 + 1, c2 - c1 - 1).c_str(), nullptr, 10);
+    rightId = wcstoul(ids.substr(c2 + 1).c_str(),      nullptr, 10);
+
+    return leftId != 0 && arcId != 0 && rightId != 0;
     }
 
-// CKS::Location and derived classes have protected destructors — they are
-// GAtom reference-counted objects and must live on the heap via LocationPtr.
+// CKS::Location and derived classes have protected destructors — they must live
+// on the heap and be held via LocationPtr (GAtom reference counting).
 static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
                     int nDispView, const CKSMatrix& matCPlane,
                     CKSDimensionOptions& opts)
@@ -34,22 +49,19 @@ static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     if(part.GetLine(ent, &drawInst, ptStart, ptEnd) != CK_NOERROR)
         return;
 
-    // Direction of the segment projected into XY
     double dx = ptEnd.m_dX - ptStart.m_dX;
     double dy = ptEnd.m_dY - ptStart.m_dY;
     double projLen = sqrt(dx * dx + dy * dy);
     if(projLen < 1e-10)
         return;
 
-    // Axis angle aligns the dimension with the segment so true length is shown
+    // Axis angle aligns the dimension with the segment → measures true length
     double dAxisAngle = atan2(dy, dx) * 180.0 / M_PI;
 
-    // Text position: midpoint offset perpendicular to the segment
-    double perpX = -dy / projLen * kDimOffset;
-    double perpY =  dx / projLen * kDimOffset;
+    // Text offset perpendicular to the segment
     CKSCoord textPt(
-        (ptStart.m_dX + ptEnd.m_dX) * 0.5 + perpX,
-        (ptStart.m_dY + ptEnd.m_dY) * 0.5 + perpY,
+        (ptStart.m_dX + ptEnd.m_dX) * 0.5 + (-dy / projLen) * kDimOffset,
+        (ptStart.m_dY + ptEnd.m_dY) * 0.5 + ( dx / projLen) * kDimOffset,
         (ptStart.m_dZ + ptEnd.m_dZ) * 0.5);
 
     CKS::LocationPtr locFirst  = new CKS::EndEntLoc(ptStart, ent, drawInst, true,  1);
@@ -70,7 +82,6 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
                    &arcAttrib, &arcMatrix) != CK_NOERROR)
         return;
 
-    // Arc center is the translation column of the matrix
     double vals[4][4];
     arcMatrix.GetValues(vals);
     CKSCoord center(vals[3][0], vals[3][1], vals[3][2]);
@@ -81,7 +92,6 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     refArc.m_dEndAngle   = dStartAng + dDeltaAng;
     refArc.m_ptCenter    = center;
 
-    // Text position at the arc midpoint angle, 1.5× radius from center
     double midAngRad = (dStartAng + dDeltaAng * 0.5) * M_PI / 180.0;
     CKSCoord textPt(
         center.m_dX + cos(midAngRad) * dRad * 1.5,
@@ -93,68 +103,24 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
                         NULL, NULL, &drawInst);
     }
 
-int DimLayout()
+// Fallback: dimension all level-2.1 lines and arcs visible in the instance.
+// Used when the view name doesn't carry encoded entity IDs (old TubeMaker format).
+static int DimByLevel(CKPart& part, CKSEntityArray& geom, CKSDrawInst& drawInst,
+                      int nDispView, const CKSMatrix& matCPlane,
+                      CKSDimensionOptions& linOpts, CKSDimensionOptions& circOpts)
     {
-    CKPart part = CKGetActivePart();
-    if(!part.IsValid())
-        return CKError;
-
-    // This function only makes sense in Layout mode
-    if(TRUE != part.InLayoutMode())
-        {
-        AfxMessageBox(L"Switch to Layout mode before running DimLayout.");
-        return CKNoError;
-        }
-
-    // Select the drawing instance (bend view) to dimension
-    CKSEntity selEntity;
-    CKSDrawInst drawInst;
-    switch(part.GetEnt(L"Select bend drawing instance to dimension:",
-                       selEntity, drawInst, CKS::SelectInst))
-        {
-        case CKNoError:
-            break;
-        default:
-            return CKNoError;
-        }
-
-    if(!drawInst.IsValid())
-        return CKNoError;
-
-    // Get all entities projected into this instance
-    CKSEntityArray geom;
-    if(part.GetInstanceGeometry(drawInst, geom) != CK_NOERROR)
-        {
-        AfxMessageBox(L"GetInstanceGeometry failed.");
-        return CKError;
-        }
-
-    // The display view ID drives dimension association to the view
-    int nDispView = (int)part.GetID(drawInst);
-
-    // Active construction plane for dimension orientation
-    CKSMatrix matCPlane;
-    part.GetActiveCPlaneMatrix(matCPlane);
-
-    // Dimension options (read from part's current settings)
-    CKSDimensionOptions linOpts;
-    part.GetActiveAttrib(linOpts, CKMaskLinearDim);
-
-    CKSDimensionOptions circOpts;
-    part.GetActiveAttrib(circOpts, CKMaskCircularDim);
-    circOpts.m_Lines.SetDisplayStyle(UCHAR(CK_RadialCircular));
-
-    int dimsCreated = 0;
-
+    int count = 0;
     for(size_t i = 0; i < geom.size(); ++i)
         {
         CKSEntity ent = geom[i];
         if(!ent.IsValid())
             continue;
 
-        // Only dimension TubeGeo entities (level 2.1)
+        CKSLevel level;
+        if(part.GetEntityLevel(ent, level) != CK_NOERROR || !level.IsValid())
+            continue;
         std::wstring levelNum;
-        if(!GetEntityLevelNumber(part, ent, levelNum))
+        if(part.GetLevelInfo(level, NULL, &levelNum, NULL, NULL, NULL) != CK_NOERROR)
             continue;
         if(levelNum != kTubeGeoLevelNum)
             continue;
@@ -164,20 +130,92 @@ int DimLayout()
             continue;
 
         if(entType == CKMaskLine)
-            {
-            DimLine(part, ent, drawInst, nDispView, matCPlane, linOpts);
-            ++dimsCreated;
-            }
+            { DimLine(part, ent, drawInst, nDispView, matCPlane, linOpts); ++count; }
         else if(entType == CKMaskArc)
+            { DimArc(part, ent, drawInst, nDispView, circOpts); ++count; }
+        }
+    return count;
+    }
+
+int DimLayout()
+    {
+    CKPart part = CKGetActivePart();
+    if(!part.IsValid())
+        return CKError;
+
+    if(TRUE != part.InLayoutMode())
+        {
+        AfxMessageBox(L"Switch to Layout mode before running DimLayout.");
+        return CKNoError;
+        }
+
+    CKSEntity selEntity;
+    CKSDrawInst drawInst;
+    switch(part.GetEnt(L"Select bend drawing instance to dimension:",
+                       selEntity, drawInst, CKS::SelectInst))
+        {
+        case CKNoError: break;
+        default:        return CKNoError;
+        }
+
+    if(!drawInst.IsValid())
+        return CKNoError;
+
+    // Retrieve the display view name from the instance attributes.
+    // TubeMaker encodes the three relevant entity IDs: "BendN:leftId,arcId,rightId"
+    CKSCoord ckscBase;
+    double dScale = 0, dRot = 0, dW = 0, dH = 0;
+    bool bFrozen = false, bBorder = false;
+    CKS::Rendering ucRender = CKS::RenderWireFrame;
+    std::wstring viewName;
+    part.GetInstAttributes(drawInst, ckscBase, dScale, dRot, dW, dH,
+                           bFrozen, bBorder, ucRender, NULL, NULL, NULL,
+                           NULL, NULL, NULL, &viewName);
+
+    int nDispView = (int)part.GetID(drawInst);
+
+    CKSMatrix matCPlane;
+    part.GetActiveCPlaneMatrix(matCPlane);
+
+    CKSDimensionOptions linOpts;
+    part.GetActiveAttrib(linOpts, CKMaskLinearDim);
+
+    CKSDimensionOptions circOpts;
+    part.GetActiveAttrib(circOpts, CKMaskCircularDim);
+    circOpts.m_Lines.SetDisplayStyle(UCHAR(CK_RadialCircular));
+
+    int dimsCreated = 0;
+
+    ULONG leftId = 0, arcId = 0, rightId = 0;
+    if(ParseBendViewName(viewName, leftId, arcId, rightId))
+        {
+        // New TubeMaker format: dimension only the three specific entities
+        CKSEntity leftLine  = part.GetEntity(leftId);
+        CKSEntity arcEnt    = part.GetEntity(arcId);
+        CKSEntity rightLine = part.GetEntity(rightId);
+
+        if(leftLine.IsValid())
+            { DimLine(part, leftLine,  drawInst, nDispView, matCPlane, linOpts); ++dimsCreated; }
+        if(arcEnt.IsValid())
+            { DimArc(part,  arcEnt,    drawInst, nDispView, circOpts); ++dimsCreated; }
+        if(rightLine.IsValid())
+            { DimLine(part, rightLine, drawInst, nDispView, matCPlane, linOpts); ++dimsCreated; }
+        }
+    else
+        {
+        // Fallback: view name has no encoded IDs — dimension all level-2.1 entities
+        CKSEntityArray geom;
+        if(part.GetInstanceGeometry(drawInst, geom) != CK_NOERROR)
             {
-            DimArc(part, ent, drawInst, nDispView, circOpts);
-            ++dimsCreated;
+            AfxMessageBox(L"GetInstanceGeometry failed.");
+            return CKError;
             }
+        dimsCreated = DimByLevel(part, geom, drawInst, nDispView, matCPlane, linOpts, circOpts);
         }
 
     if(dimsCreated == 0)
         {
-        AfxMessageBox(L"No level-2.1 lines or arcs found in the selected instance.");
+        AfxMessageBox(L"No entities to dimension were found in the selected instance.");
         return CKNoError;
         }
 
