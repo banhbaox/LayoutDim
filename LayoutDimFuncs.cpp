@@ -81,7 +81,7 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     refArc.m_dEndAngle   = dStartAng + dDeltaAng;
     refArc.m_ptCenter    = center;
 
-    double midAngRad = (dStartAng + dDeltaAng * 0.5) * M_PI / 180.0;
+    double midAngRad = dStartAng + dDeltaAng * 0.5;
     CKSCoord textPt(
         center.m_dX + cos(midAngRad) * dRad * 1.5,
         center.m_dY + sin(midAngRad) * dRad * 1.5,
@@ -205,8 +205,8 @@ int DimLayout()
     CKSCoord xAx(av[0][0], av[0][1], av[0][2]);
     CKSCoord yAx(av[1][0], av[1][1], av[1][2]);
 
-    double startRad = bestStart * M_PI / 180.0;
-    double endRad   = (bestStart + bestDelta) * M_PI / 180.0;
+    double startRad = bestStart;        // GetArc returns radians
+    double endRad   = bestStart + bestDelta;
 
     CKSCoord T1(
         center.m_dX + bestRad * (cos(startRad) * xAx.m_dX + sin(startRad) * yAx.m_dX),
