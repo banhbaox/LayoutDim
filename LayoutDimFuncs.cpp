@@ -9,8 +9,8 @@
 #include "Funcs.h"
 
 static const std::wstring kTubeGeoLevelNum = L"2.1";
-static const double kDimOffset   = 25.0;  // text offset from entity
-static const double kEndpointTol = 0.001; // tolerance for tangent-point matching (model units)
+static const double kDimOffset   = 25.0;
+static const double kEndpointTol = 0.001;
 
 static double Dist3D(const CKSCoord& a, const CKSCoord& b)
     {
@@ -81,10 +81,11 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     refArc.m_dEndAngle   = dStartAng + dDeltaAng;
     refArc.m_ptCenter    = center;
 
-    double midAngRad = dStartAng + dDeltaAng * 0.5;
+    // Angles from GetArc are in radians
+    double midAng = dStartAng + dDeltaAng * 0.5;
     CKSCoord textPt(
-        center.m_dX + cos(midAngRad) * dRad * 1.5,
-        center.m_dY + sin(midAngRad) * dRad * 1.5,
+        center.m_dX + cos(midAng) * dRad * 1.5,
+        center.m_dY + sin(midAng) * dRad * 1.5,
         center.m_dZ);
     CKS::LocationPtr textLoc = new CKS::Location(textPt);
 
@@ -104,19 +105,35 @@ int DimLayout()
         return CKNoError;
         }
 
+    // User clicks the bend ARC in the layout view.
+    // Selecting the arc directly is the only reliable way to identify it —
+    // there is no KC SDK API that maps a drawing instance back to its display view.
     CKSEntity selEntity;
     CKSDrawInst drawInst;
-    switch(part.GetEnt(L"Select bend drawing instance to dimension:",
-                       selEntity, drawInst, CKS::SelectInst))
+    switch(part.GetEnt(L"Click the bend arc to dimension (2 lines + arc will be added):",
+                       selEntity, drawInst, 0))
         {
         case CKNoError: break;
         default:        return CKNoError;
         }
 
-    if(!drawInst.IsValid())
+    if(!selEntity.IsValid())
         return CKNoError;
 
-    // Get all entities visible through this instance
+    // Validate: must be an arc on the TubeGeo level
+    CKMaskTypes entType;
+    if(part.GetEntityType(selEntity, entType) != CK_NOERROR || entType != CKMaskArc)
+        {
+        AfxMessageBox(L"Please click directly on a bend arc (not a line or other entity).");
+        return CKNoError;
+        }
+    if(!IsOnTubeGeoLevel(part, selEntity))
+        {
+        AfxMessageBox(L"Selected arc is not on level 2.1 (TubeGeo). Make sure visibility is on.");
+        return CKNoError;
+        }
+
+    // Get all level-2.1 lines visible through this drawing instance
     CKSEntityArray geom;
     if(part.GetInstanceGeometry(drawInst, geom) != CK_NOERROR)
         {
@@ -124,102 +141,47 @@ int DimLayout()
         return CKError;
         }
 
-    // Separate level-2.1 entities into lines and arcs
-    std::vector<CKSEntity> lines, arcs;
+    std::vector<CKSEntity> lines;
     for(size_t i = 0; i < geom.size(); ++i)
         {
         CKSEntity ent = geom[i];
         if(!ent.IsValid() || !IsOnTubeGeoLevel(part, ent))
             continue;
-
         CKMaskTypes t;
-        if(part.GetEntityType(ent, t) != CK_NOERROR)
-            continue;
-
-        if(t == CKMaskLine)      lines.push_back(ent);
-        else if(t == CKMaskArc)  arcs.push_back(ent);
+        if(part.GetEntityType(ent, t) == CK_NOERROR && t == CKMaskLine)
+            lines.push_back(ent);
         }
 
-    if(arcs.empty())
+    // Get arc geometry in 3D world space (NULL draw inst = model coordinates)
+    double dRad, dStartAng, dDeltaAng;
+    CKEntityAttrib arcAttr;
+    CKSMatrix arcMat;
+    if(part.GetArc(selEntity, NULL, &dRad, &dStartAng, &dDeltaAng, &arcAttr, &arcMat) != CK_NOERROR)
         {
-        AfxMessageBox(L"No level-2.1 arcs found in this instance.");
-        return CKNoError;
+        AfxMessageBox(L"Failed to retrieve arc geometry.");
+        return CKError;
         }
 
-    // Retrieve the 3D display view matrix from the drawing instance.
-    // Its origin (column 3) is the bend corner point (ptB) used to build the view.
-    CKSCoord ckscBase;
-    double dScale = 0, dRot = 0, dW = 0, dH = 0;
-    bool bFrozen = false, bBorder = false;
-    CKS::Rendering ucRender = CKS::RenderWire;
-    CKSMatrix viewMat;
-    part.GetInstAttributes(drawInst, ckscBase, dScale, dRot, dW, dH,
-                           bFrozen, bBorder, ucRender, &viewMat);
-
-    double vm[4][4];
-    viewMat.GetValues(vm);
-    CKSCoord viewOrigin(vm[3][0], vm[3][1], vm[3][2]);
-
-    // Find the arc whose center is closest to the view origin (= bend corner).
-    // Each bend's arc center is uniquely close to its own corner in a valid tube.
-    CKSEntity targetArc;
-    double bestDist  = 1e30;
-    double bestRad   = 0, bestStart = 0, bestDelta = 0;
-    CKSMatrix bestArcMat;
-
-    for(size_t i = 0; i < arcs.size(); ++i)
-        {
-        double rad, startAng, deltaAng;
-        CKEntityAttrib attr;
-        CKSMatrix aMat;
-        if(part.GetArc(arcs[i], NULL, &rad, &startAng, &deltaAng, &attr, &aMat) != CK_NOERROR)
-            continue;
-
-        double av[4][4];
-        aMat.GetValues(av);
-        CKSCoord arcCenter(av[3][0], av[3][1], av[3][2]);
-
-        double d = Dist3D(arcCenter, viewOrigin);
-        if(d < bestDist)
-            {
-            bestDist    = d;
-            targetArc   = arcs[i];
-            bestRad     = rad;
-            bestStart   = startAng;
-            bestDelta   = deltaAng;
-            bestArcMat  = aMat;
-            }
-        }
-
-    if(!targetArc.IsValid())
-        {
-        AfxMessageBox(L"Could not identify the target arc for this view.");
-        return CKNoError;
-        }
-
-    // Compute the arc's two tangent endpoints (T1 = start, T2 = end) in 3D world space.
-    // The arc matrix encodes center (col 3) and local axes (cols 0,1).
+    // Compute arc tangent endpoints T1 (start) and T2 (end) in 3D world space.
+    // Angles from GetArc are in radians; arc local axes are in columns 0 and 1.
     double av[4][4];
-    bestArcMat.GetValues(av);
+    arcMat.GetValues(av);
     CKSCoord center(av[3][0], av[3][1], av[3][2]);
     CKSCoord xAx(av[0][0], av[0][1], av[0][2]);
     CKSCoord yAx(av[1][0], av[1][1], av[1][2]);
 
-    double startRad = bestStart;        // GetArc returns radians
-    double endRad   = bestStart + bestDelta;
-
     CKSCoord T1(
-        center.m_dX + bestRad * (cos(startRad) * xAx.m_dX + sin(startRad) * yAx.m_dX),
-        center.m_dY + bestRad * (cos(startRad) * xAx.m_dY + sin(startRad) * yAx.m_dY),
-        center.m_dZ + bestRad * (cos(startRad) * xAx.m_dZ + sin(startRad) * yAx.m_dZ));
+        center.m_dX + dRad * (cos(dStartAng) * xAx.m_dX + sin(dStartAng) * yAx.m_dX),
+        center.m_dY + dRad * (cos(dStartAng) * xAx.m_dY + sin(dStartAng) * yAx.m_dY),
+        center.m_dZ + dRad * (cos(dStartAng) * xAx.m_dZ + sin(dStartAng) * yAx.m_dZ));
 
+    double endAng = dStartAng + dDeltaAng;
     CKSCoord T2(
-        center.m_dX + bestRad * (cos(endRad) * xAx.m_dX + sin(endRad) * yAx.m_dX),
-        center.m_dY + bestRad * (cos(endRad) * xAx.m_dY + sin(endRad) * yAx.m_dY),
-        center.m_dZ + bestRad * (cos(endRad) * xAx.m_dZ + sin(endRad) * yAx.m_dZ));
+        center.m_dX + dRad * (cos(endAng) * xAx.m_dX + sin(endAng) * yAx.m_dX),
+        center.m_dY + dRad * (cos(endAng) * xAx.m_dY + sin(endAng) * yAx.m_dY),
+        center.m_dZ + dRad * (cos(endAng) * xAx.m_dZ + sin(endAng) * yAx.m_dZ));
 
-    // Find the two lines whose endpoints touch T1 or T2.
-    // Each trimmed line's endpoint exactly meets an arc tangent point.
+    // Find the two lines whose trimmed endpoints meet the arc tangent points
     CKSEntity lineAtT1, lineAtT2;
     for(size_t i = 0; i < lines.size(); ++i)
         {
@@ -236,7 +198,7 @@ int DimLayout()
             lineAtT2 = lines[i];
         }
 
-    int nDispView  = (int)part.GetID(drawInst);
+    int nDispView = (int)part.GetID(drawInst);
     CKSMatrix matCPlane;
     part.GetActiveCPlaneMatrix(matCPlane);
 
@@ -247,16 +209,13 @@ int DimLayout()
     part.GetActiveAttrib(circOpts, CKMaskCircularDim);
     circOpts.m_Lines.SetDisplayStyle(UCHAR(CK_RadialCircular));
 
-    int dimsCreated = 0;
-
     if(lineAtT1.IsValid())
-        { DimLine(part, lineAtT1, drawInst, nDispView, matCPlane, linOpts); ++dimsCreated; }
+        DimLine(part, lineAtT1, drawInst, nDispView, matCPlane, linOpts);
 
-    DimArc(part, targetArc, drawInst, nDispView, circOpts);
-    ++dimsCreated;
+    DimArc(part, selEntity, drawInst, nDispView, circOpts);
 
     if(lineAtT2.IsValid())
-        { DimLine(part, lineAtT2, drawInst, nDispView, matCPlane, linOpts); ++dimsCreated; }
+        DimLine(part, lineAtT2, drawInst, nDispView, matCPlane, linOpts);
 
     part.NoteState();
     return CKNoError;
