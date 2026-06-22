@@ -103,23 +103,16 @@ int DimLayout()
     if(!IsOnTubeGeoLevel(part, selEntity))
         { AfxMessageBox(L"Selected arc is not on level 2.1 (TubeGeo)."); return CKNoError; }
 
-    // Find the TubeMaker display view that owns this arc.
-    // TubeMaker encodes entity IDs in the view name: "Bend#:leftLineId,arcId,rightLineId"
-    ULONG arcId = part.GetID(selEntity);
-    int nDispView = -1;
+    // Confirm TubeMaker has been run by checking for at least one "Bend" display view.
+    bool hasBendViews = false;
     for(int n = 1; n <= 500; ++n)
         {
         std::wstring vname;
         if(part.GetDispViewName(n, vname) != CK_NOERROR) break;
-        size_t col = vname.find(L':'); if(col == std::wstring::npos) continue;
-        std::wstring ids = vname.substr(col+1);
-        size_t c1 = ids.find(L','); if(c1 == std::wstring::npos) continue;
-        size_t c2 = ids.find(L',', c1+1); if(c2 == std::wstring::npos) continue;
-        ULONG vid = (ULONG)wcstoul(ids.substr(c1+1, c2-c1-1).c_str(), nullptr, 10);
-        if(vid == arcId) { nDispView = n; break; }
+        if(vname.size() >= 4 && vname.substr(0, 4) == L"Bend") { hasBendViews = true; break; }
         }
-    if(nDispView < 0)
-        { AfxMessageBox(L"Arc not found in a TubeMaker bend view. Run TubeMaker first."); return CKNoError; }
+    if(!hasBendViews)
+        { AfxMessageBox(L"No TubeMaker bend views found. Run TubeMaker first."); return CKNoError; }
 
     // Collect level-2.1 lines from the clicked drawing instance
     CKSEntityArray geom;
