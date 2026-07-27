@@ -252,6 +252,28 @@ int DimLayout()
         if(!lineAtT2.IsValid() && (Dist3D(ls,T2)<kEndpointTol || Dist3D(le,T2)<kEndpointTol)) lineAtT2=lines[i];
         }
 
+    // DIAGNOSTIC (temporary): the 2nd linear dimension has come out identical to
+    // the 1st across two otherwise-unrelated rounds of fixes to AddLinearDim's
+    // parameters - suspicious enough to suspect lineAtT1/lineAtT2 might be
+    // resolving to the SAME entity (a bug in the tangent-point matching above)
+    // rather than another parameter-tuning miss. Report their IDs and sheet-space
+    // geometry directly instead of guessing a 5th time.
+    if(lineAtT1.IsValid() && lineAtT2.IsValid())
+        {
+        CKSCoord d1s, d1e, d2s, d2e;
+        part.GetLine(lineAtT1, &drawInst, d1s, d1e);
+        part.GetLine(lineAtT2, &drawInst, d2s, d2e);
+        CString diag;
+        diag.Format(
+            L"lineAtT1 ID=%u  sheet pts: (%.4f,%.4f) -> (%.4f,%.4f)\n"
+            L"lineAtT2 ID=%u  sheet pts: (%.4f,%.4f) -> (%.4f,%.4f)\n"
+            L"Same entity? %s",
+            part.GetID(lineAtT1), d1s.m_dX, d1s.m_dY, d1e.m_dX, d1e.m_dY,
+            part.GetID(lineAtT2), d2s.m_dX, d2s.m_dY, d2e.m_dX, d2e.m_dY,
+            (part.GetID(lineAtT1) == part.GetID(lineAtT2)) ? L"YES - bug in tangent matching" : L"No - different entities");
+        AfxMessageBox(diag);
+        }
+
     CKSMatrix cplaneMat; part.GetActiveCPlaneMatrix(cplaneMat);
 
     // The instance's own 3D display-view orientation (SDK.RTF: GetInstAttributes'
@@ -286,11 +308,22 @@ int DimLayout()
     angOpts.m_Format.SetViewReadableText(true);
     angOpts.m_Format.SetCPlaneText(false);
 
-    if(lineAtT1.IsValid()) DimLine(part, lineAtT1, drawInst, viewMat, linOpts);
+    // Arc dimension is confirmed working under the session's ORIGINAL active
+    // CPlane, so it runs first/unchanged. The origin bug on the linear/angular
+    // dims has persisted across two different pMatrix-translation strategies
+    // (zeroed, then real) - passed as a per-call parameter, pMatrix may not be
+    // what extension-line placement actually anchors to at all. Untried until
+    // now: making viewMat the SESSION'S real active CPlane (not just a pMatrix
+    // argument) for the duration of the line/angle dims, then restoring the
+    // original CPlane afterward so it doesn't leak into anything else.
     DimArc(part, selEntity, drawInst, cplaneMat, circOpts);
+
+    part.SetActiveCPlaneMatrix(viewMat);
+    if(lineAtT1.IsValid()) DimLine(part, lineAtT1, drawInst, viewMat, linOpts);
     if(lineAtT2.IsValid()) DimLine(part, lineAtT2, drawInst, viewMat, linOpts);
     if(lineAtT1.IsValid() && lineAtT2.IsValid())
         DimAngle(part, lineAtT1, lineAtT2, selEntity, drawInst, viewMat, angOpts);
+    part.SetActiveCPlaneMatrix(cplaneMat);
 
     part.NoteState();
     return CKNoError;
