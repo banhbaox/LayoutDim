@@ -65,16 +65,27 @@ static bool IsOnTubeGeoLevel(CKPart& part, CKSEntity& ent)
 // treatments of "the matrix/plane" (zeroed pMatrix translation, real pMatrix
 // translation, session active CPlane) have now all failed to move the
 // extension-line origin, while angle/value/text are all independently
-// confirmed correct - the common factor across all three failures is that a
-// CUSTOM matrix was involved at all. Round 6: drop pMatrix to NULL entirely.
-// The diagnostic confirmed lineAtT1/lineAtT2's sheet-space points (from
-// GetLine(&drawInst)) are correct and distinct - if extension lines anchor
-// directly off the entity+drawInst pairing carried by the EndEntLoc Location
-// objects (not off pMatrix at all), removing the matrix argument should be
-// harmless to angle/value (dAxisAngle still supplies the rotation) while
-// possibly being the actual fix for placement.
+// confirmed correct. Round 6 dropped pMatrix to NULL entirely - this DID fix
+// the origin (extension lines correctly attach to the actual lines now), but
+// regressed the angle back to horizontal-only. Per SDK.RTF, dAxisAngle is "the
+// angle from the dimension matrix x-axis to the CPlane x-axis" - when
+// pMatrix=NULL, "the dimension matrix" defaults to the current CPlane itself,
+// so dAxisAngle ends up measuring a plane against itself: always a no-op,
+// regardless of the value passed in. That explains the whole trade-off: a
+// custom matrix gives dAxisAngle a real second reference (correct angle, wrong
+// origin); no matrix collapses it to nothing (correct origin, wrong angle).
+//
+// Round 7: restore pMatrix=viewMat, but switch pFirstLoc/pSecondLoc from
+// EndEntLoc (entity+drawInst-wrapped) to plain coordinate CKS::Location - every
+// prior round using a custom matrix also used EndEntLoc, so the two were never
+// tested apart. Hypothesis: EndEntLoc's own entity/instance-relative mapping
+// plus a second, independent pMatrix transform double-applies, landing the
+// origin far away regardless of the matrix's translation value. A bare
+// coordinate Location only goes through pMatrix once. Losing entity
+// associativity is fine here - this is a one-time placement, not a live-
+// tracked reference back to the line.
 static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
-                    CKSDimensionOptions& opts)
+                    const CKSMatrix& viewMat, CKSDimensionOptions& opts)
     {
     CKSCoord ptStart, ptEnd;
     if(part.GetLine(ent, &drawInst, ptStart, ptEnd) != CK_NOERROR) return;
@@ -95,11 +106,11 @@ static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     refLine.m_ptStart = ptStart;
     refLine.m_ptEnd   = ptEnd;
 
-    CKS::LocationPtr locFirst  = new CKS::EndEntLoc(ptStart, ent, drawInst, true,  1);
-    CKS::LocationPtr locSecond = new CKS::EndEntLoc(ptEnd,   ent, drawInst, false, 1);
+    CKS::LocationPtr locFirst  = new CKS::Location(ptStart);
+    CKS::LocationPtr locSecond = new CKS::Location(ptEnd);
     CKS::LocationPtr textLoc   = new CKS::Location(textPt);
     part.AddLinearDim(dAxisAngle, &refLine, locFirst, locSecond,
-                      textLoc, &opts, 0, NULL, NULL);
+                      textLoc, &opts, 0, NULL, &viewMat);
     }
 
 static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
@@ -153,9 +164,13 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
 // Round 4: same CPlaneText fix as DimLine (see its comment) - SetCPlaneText(false)
 // on angOpts (set in DimLayout).
 //
-// Round 6: same pMatrix=NULL simplification as DimLine (see its comment) -
-// three different matrix/plane treatments all failed to fix extension-line
-// placement, so drop the custom matrix argument entirely.
+// Round 6 dropped pMatrix to NULL, matching DimLine's change at the time.
+//
+// Round 7: restore pMatrix=viewMat, matching DimLine's latest change - this
+// function never used EndEntLoc (refLine1/refLine2 are already bare CKSRefLine
+// values, not entity-wrapped), so the "double transform" fix that motivated
+// Round 7 in DimLine doesn't directly apply here, but keeping both dimension
+// types on the same matrix strategy avoids testing them apart.
 //
 // UNVERIFIED, flag for Kubotek if still wrong: aLocations (CKS::LocationArray)
 // has no create-from-scratch sample anywhere in the SDK - every existing use
@@ -164,7 +179,7 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
 // parameter's required contents is the concrete question to ask.
 static void DimAngle(CKPart& part, CKSEntity& line1, CKSEntity& line2,
                      CKSEntity& arc, CKSDrawInst& drawInst,
-                     CKSDimensionOptions& opts)
+                     const CKSMatrix& viewMat, CKSDimensionOptions& opts)
     {
     CKSCoord l1s, l1e, l2s, l2e;
     if(part.GetLine(line1, &drawInst, l1s, l1e) != CK_NOERROR) return;
@@ -197,7 +212,7 @@ static void DimAngle(CKPart& part, CKSEntity& line1, CKSEntity& line2,
     CKS::LocationArray emptyLocs;
 
     part.AddAngularDim(true /* always <= 180 degrees */, refLine1, refLine2,
-                       emptyLocs, textLoc, &drawInst, &opts, NULL);
+                       emptyLocs, textLoc, &drawInst, &opts, &viewMat);
     }
 
 int DimLayout()
@@ -289,11 +304,18 @@ int DimLayout()
         AfxMessageBox(diag);
         }
 
-    // cplaneMat (the session's generic active CPlane) is only needed for
-    // DimArc now - Round 6 dropped the custom instance-view matrix
-    // (GetInstAttributes' pViewMat) entirely from the linear/angular dims,
-    // see DimLine's comment for why.
     CKSMatrix cplaneMat; part.GetActiveCPlaneMatrix(cplaneMat);
+
+    // The instance's own 3D display-view orientation (SDK.RTF: GetInstAttributes'
+    // pViewMat = "the matrix of the instance's display View") - restored for
+    // Round 7 (see DimLine's comment for the full history of why this was
+    // dropped in Round 6 and is now back, paired with plain Location objects
+    // instead of entity-wrapped ones).
+    CKSCoord ckscBase; double dScale, dRotation, dWidth, dHeight;
+    bool bFrozen, bDrawBorder; CKS::Rendering ucRendering;
+    CKSMatrix viewMat;
+    part.GetInstAttributes(drawInst, ckscBase, dScale, dRotation, dWidth, dHeight,
+                           bFrozen, bDrawBorder, ucRendering, &viewMat);
 
     CKSDimensionOptions linOpts; part.GetActiveAttrib(linOpts, CKMaskLinearDim);
     // Aligned = true length along the (possibly tilted) line, matching what
@@ -316,18 +338,12 @@ int DimLayout()
     angOpts.m_Format.SetViewReadableText(true);
     angOpts.m_Format.SetCPlaneText(false);
 
-    // Arc dimension is confirmed working using entity+drawInst alone (no custom
-    // pMatrix at all) - runs unchanged. Round 6: same treatment now applied to
-    // the linear/angular dims - see DimLine's comment for why the custom matrix
-    // (whether passed per-call or set as the session's active CPlane) has been
-    // dropped entirely; only entity+drawInst (via the Location objects) and
-    // dAxisAngle now govern these dimensions.
     DimArc(part, selEntity, drawInst, cplaneMat, circOpts);
 
-    if(lineAtT1.IsValid()) DimLine(part, lineAtT1, drawInst, linOpts);
-    if(lineAtT2.IsValid()) DimLine(part, lineAtT2, drawInst, linOpts);
+    if(lineAtT1.IsValid()) DimLine(part, lineAtT1, drawInst, viewMat, linOpts);
+    if(lineAtT2.IsValid()) DimLine(part, lineAtT2, drawInst, viewMat, linOpts);
     if(lineAtT1.IsValid() && lineAtT2.IsValid())
-        DimAngle(part, lineAtT1, lineAtT2, selEntity, drawInst, angOpts);
+        DimAngle(part, lineAtT1, lineAtT2, selEntity, drawInst, viewMat, angOpts);
 
     part.NoteState();
     return CKNoError;
