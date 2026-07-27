@@ -44,12 +44,22 @@ static bool IsOnTubeGeoLevel(CKPart& part, CKSEntity& ent)
 //
 // Round 3: dAxisAngle needs to be computed per-line after all, exactly like Round 1,
 // but now measured against the CORRECT matrix (viewMat) instead of the generic
-// CPlane - that specific combination was never tried. viewMat's translation is a
-// real-world 3D point (the bend's actual position in the model), unrelated to the
-// sheet's own coordinate origin that GetLine(&drawInst)'s ptStart/ptEnd are
-// expressed in - passing it through as-is put the dimension's origin "far away".
-// Zeroing the translation (TranslateTo(0,0,0)) keeps only the rotation, which is
-// what dAxisAngle's "matrix x-axis" reference actually needs.
+// CPlane - that specific combination was never tried. Also stripped viewMat's
+// translation via TranslateTo(0,0,0), reasoning it was irrelevant to a pure
+// rotation reference - this "fixed" the origin but only by accident, per Round 4.
+//
+// Round 4 (confirmed by the user manually toggling live in KeyCreator): the
+// dimension's "Display Text in Detail Plane" checkbox (m_Format's CPlaneText,
+// checked/true by default, never touched until now) makes KC compute TEXT
+// orientation from the ACTIVE CPlane - a different, mismatched plane from
+// viewMat - hence backwards text, independent of everything else being correct.
+// Unchecking it in the UI fixed the text, but then broke the extension lines
+// ("drawn to some invisible entity far away") - because with CPlaneText off, KC
+// uses pMatrix's full transform (rotation AND translation) for placement, and
+// Round 3's zeroed translation anchors that to world origin, nowhere near the
+// actual part. So: SetCPlaneText(false) so text and geometry both consistently
+// use viewMat instead of two different, mismatched planes - and viewMat's REAL
+// translation (not zeroed) is what that placement now needs.
 static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
                     const CKSMatrix& viewMat, CKSDimensionOptions& opts)
     {
@@ -72,14 +82,11 @@ static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     refLine.m_ptStart = ptStart;
     refLine.m_ptEnd   = ptEnd;
 
-    CKSMatrix rotOnlyMat = viewMat;
-    rotOnlyMat.TranslateTo(0.0, 0.0, 0.0);
-
     CKS::LocationPtr locFirst  = new CKS::EndEntLoc(ptStart, ent, drawInst, true,  1);
     CKS::LocationPtr locSecond = new CKS::EndEntLoc(ptEnd,   ent, drawInst, false, 1);
     CKS::LocationPtr textLoc   = new CKS::Location(textPt);
     part.AddLinearDim(dAxisAngle, &refLine, locFirst, locSecond,
-                      textLoc, &opts, 0, NULL, &rotOnlyMat);
+                      textLoc, &opts, 0, NULL, &viewMat);
     }
 
 static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
@@ -128,10 +135,12 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
 // (not raw CKSEntity) + an explicit CKSDrawInst *pInst - the same shape of
 // fields GetAngularDim/ModAngularDim round-trip for an EXISTING angular dim
 // (see DimensionCreateFuncs1.cpp's ModAngularDim sample), so this is very
-// likely what Ctrl+W's Two-Lines tool actually calls under the hood. Also
-// applying DimLine's same translation-stripped viewMat fix here (see DimLine's
-// comment) since this dimension was also measuring "off in the distance" -
-// almost certainly the same world-space-origin-vs-sheet-space-points mismatch.
+// likely what Ctrl+W's Two-Lines tool actually calls under the hood.
+//
+// Round 4: same CPlaneText/translation fix as DimLine (see its comment) -
+// SetCPlaneText(false) on angOpts (set in DimLayout) plus viewMat's real,
+// un-zeroed translation, so text and placement both consistently follow the
+// same plane instead of splitting across two mismatched ones.
 //
 // UNVERIFIED, flag for Kubotek if still wrong: aLocations (CKS::LocationArray)
 // has no create-from-scratch sample anywhere in the SDK - every existing use
@@ -169,14 +178,11 @@ static void DimAngle(CKPart& part, CKSEntity& line1, CKSEntity& line2,
     CKSRefLine refLine1; refLine1.m_ptStart = l1s; refLine1.m_ptEnd = l1e;
     CKSRefLine refLine2; refLine2.m_ptStart = l2s; refLine2.m_ptEnd = l2e;
 
-    CKSMatrix rotOnlyMat = viewMat;
-    rotOnlyMat.TranslateTo(0.0, 0.0, 0.0);
-
     CKS::LocationPtr textLoc = new CKS::Location(textPt);
     CKS::LocationArray emptyLocs;
 
     part.AddAngularDim(true /* always <= 180 degrees */, refLine1, refLine2,
-                       emptyLocs, textLoc, &drawInst, &opts, &rotOnlyMat);
+                       emptyLocs, textLoc, &drawInst, &opts, &viewMat);
     }
 
 int DimLayout()
@@ -263,10 +269,14 @@ int DimLayout()
     // Aligned = true length along the (possibly tilted) line, matching what
     // Ctrl+Q's Detail/Dimension tool produces - not a horizontal/vertical-only
     // measurement. ViewReadableText keeps the dimension text horizontal/
-    // readable instead of rotated to the dimension's own angle. Neither flag
-    // was ever set in earlier attempts at this (see git history).
+    // readable instead of rotated to the dimension's own angle. CPlaneText=false
+    // (confirmed live by toggling "Display Text in Detail Plane" off in KC) is
+    // what actually fixes the backwards/mirrored text - true (the default) made
+    // text follow the active CPlane instead of viewMat, a different plane from
+    // everything else this dimension uses.
     linOpts.m_Format.SetAligned(true);
     linOpts.m_Format.SetViewReadableText(true);
+    linOpts.m_Format.SetCPlaneText(false);
 
     CKSDimensionOptions circOpts; part.GetActiveAttrib(circOpts, CKMaskCircularDim);
     circOpts.m_Lines.SetDisplayStyle(UCHAR(CK_RadialCircular));
@@ -274,6 +284,7 @@ int DimLayout()
 
     CKSDimensionOptions angOpts; part.GetActiveAttrib(angOpts, CKMaskAngularDim);
     angOpts.m_Format.SetViewReadableText(true);
+    angOpts.m_Format.SetCPlaneText(false);
 
     if(lineAtT1.IsValid()) DimLine(part, lineAtT1, drawInst, viewMat, linOpts);
     DimArc(part, selEntity, drawInst, cplaneMat, circOpts);
