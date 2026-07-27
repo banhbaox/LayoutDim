@@ -33,18 +33,23 @@ static bool IsOnTubeGeoLevel(CKPart& part, CKSEntity& ent)
 // the sheet-space coords from GetLine(&drawInst) and puts the dim far off-screen.
 //
 // Round 1 (see git history) hand-computed dAxisAngle=atan2(dy,dx) alone against the
-// generic active CPlane matrix - still produced horizontal-only dimensions. The SDK's
-// own prose docs (SDK.RTF, never checked in that round) define dAxisAngle as "the
-// angle from the DIMENSION MATRIX x-axis to the CPlane x-axis" and pMatrix as "the
-// dimension's orientation with respect to the WORLD coordinate system" - i.e. pMatrix
-// IS the dimension's own reference frame, and the generic active CPlane is very
-// unlikely to match this specific bend's actual 3D view orientation. Round 2: fetch
-// the placed instance's own view orientation via GetInstAttributes' pViewMat ("the
-// matrix of the instance's display View" per SDK.RTF - distinct from that same call's
-// own pMatrix output, which is a world-to-instance-local transform, the wrong
-// direction). Pass viewMat as AddLinearDim's pMatrix, and dAxisAngle=0.0 - relying on
-// m_Format.SetAligned(true) + pRefLine to derive the true angle from the geometry
-// itself, rather than fighting the angle math by hand a third time.
+// generic active CPlane matrix - still produced horizontal-only dimensions. Round 2
+// switched pMatrix to the instance's own view orientation (GetInstAttributes'
+// pViewMat) but replaced dAxisAngle with a flat 0.0, relying on SetAligned(true) to
+// derive the angle - line 1 (whose direction IS this view's own X axis, see
+// BuildBendViewMatrix in TubeMakerFuncs.cpp) came out aligned by coincidence, with
+// the right rotation but wrong origin; line 2 (a genuinely different direction) came
+// out at line 1's angle instead of its own - dAxisAngle=0 always means "align with
+// the matrix's own x-axis", not "derive per-line" as assumed.
+//
+// Round 3: dAxisAngle needs to be computed per-line after all, exactly like Round 1,
+// but now measured against the CORRECT matrix (viewMat) instead of the generic
+// CPlane - that specific combination was never tried. viewMat's translation is a
+// real-world 3D point (the bend's actual position in the model), unrelated to the
+// sheet's own coordinate origin that GetLine(&drawInst)'s ptStart/ptEnd are
+// expressed in - passing it through as-is put the dimension's origin "far away".
+// Zeroing the translation (TranslateTo(0,0,0)) keeps only the rotation, which is
+// what dAxisAngle's "matrix x-axis" reference actually needs.
 static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
                     const CKSMatrix& viewMat, CKSDimensionOptions& opts)
     {
@@ -56,6 +61,8 @@ static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     double projLen = sqrt(dx*dx + dy*dy);
     if(projLen < 1e-10) return;
 
+    double dAxisAngle = atan2(dy, dx) * 180.0 / M_PI;
+
     CKSCoord textPt(
         (ptStart.m_dX + ptEnd.m_dX) * 0.5 + (-dy / projLen) * kDimOffset,
         (ptStart.m_dY + ptEnd.m_dY) * 0.5 + ( dx / projLen) * kDimOffset,
@@ -65,11 +72,14 @@ static void DimLine(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     refLine.m_ptStart = ptStart;
     refLine.m_ptEnd   = ptEnd;
 
+    CKSMatrix rotOnlyMat = viewMat;
+    rotOnlyMat.TranslateTo(0.0, 0.0, 0.0);
+
     CKS::LocationPtr locFirst  = new CKS::EndEntLoc(ptStart, ent, drawInst, true,  1);
     CKS::LocationPtr locSecond = new CKS::EndEntLoc(ptEnd,   ent, drawInst, false, 1);
     CKS::LocationPtr textLoc   = new CKS::Location(textPt);
-    part.AddLinearDim(0.0, &refLine, locFirst, locSecond,
-                      textLoc, &opts, 0, NULL, &viewMat);
+    part.AddLinearDim(dAxisAngle, &refLine, locFirst, locSecond,
+                      textLoc, &opts, 0, NULL, &rotOnlyMat);
     }
 
 static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
@@ -99,10 +109,13 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
     part.AddCircularDim(refArc, &ent, textLoc, 0, &opts, NULL, NULL, &drawInst);
     }
 
-// The outside angle between the two lines flanking a bend - the Detail/Angular/
-// Two Lines (Ctrl+W) equivalent. bInnerAngle=false selects the reflex/outside
-// angle rather than the angle you'd get pointing both line directions away
-// from the bend corner.
+// The angle between the two lines flanking a bend - the Detail/Angular/Two
+// Lines (Ctrl+W) equivalent. Manufacturing convention (per user): always the
+// value <= 180 degrees - bInnerAngle=false previously gave 351 degrees, i.e.
+// exactly 360 minus the ~9 degree angle that bInnerAngle=true would have given
+// directly. Since one of the two always sits <=180 and the other >=180 by
+// construction, always requesting the inner one satisfies the rule with no
+// extra per-bend logic needed.
 //
 // Round 1 used AddAngularDim's "Two Lines" overload (raw CKSEntity, no
 // CKSDrawInst at all) with sheet-space textLoc/ckscAnglePick - measured "off in
@@ -115,7 +128,10 @@ static void DimArc(CKPart& part, CKSEntity& ent, CKSDrawInst& drawInst,
 // (not raw CKSEntity) + an explicit CKSDrawInst *pInst - the same shape of
 // fields GetAngularDim/ModAngularDim round-trip for an EXISTING angular dim
 // (see DimensionCreateFuncs1.cpp's ModAngularDim sample), so this is very
-// likely what Ctrl+W's Two-Lines tool actually calls under the hood.
+// likely what Ctrl+W's Two-Lines tool actually calls under the hood. Also
+// applying DimLine's same translation-stripped viewMat fix here (see DimLine's
+// comment) since this dimension was also measuring "off in the distance" -
+// almost certainly the same world-space-origin-vs-sheet-space-points mismatch.
 //
 // UNVERIFIED, flag for Kubotek if still wrong: aLocations (CKS::LocationArray)
 // has no create-from-scratch sample anywhere in the SDK - every existing use
@@ -153,11 +169,14 @@ static void DimAngle(CKPart& part, CKSEntity& line1, CKSEntity& line2,
     CKSRefLine refLine1; refLine1.m_ptStart = l1s; refLine1.m_ptEnd = l1e;
     CKSRefLine refLine2; refLine2.m_ptStart = l2s; refLine2.m_ptEnd = l2e;
 
+    CKSMatrix rotOnlyMat = viewMat;
+    rotOnlyMat.TranslateTo(0.0, 0.0, 0.0);
+
     CKS::LocationPtr textLoc = new CKS::Location(textPt);
     CKS::LocationArray emptyLocs;
 
-    part.AddAngularDim(false /* outside angle */, refLine1, refLine2,
-                       emptyLocs, textLoc, &drawInst, &opts, &viewMat);
+    part.AddAngularDim(true /* always <= 180 degrees */, refLine1, refLine2,
+                       emptyLocs, textLoc, &drawInst, &opts, &rotOnlyMat);
     }
 
 int DimLayout()
