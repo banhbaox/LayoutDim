@@ -274,12 +274,19 @@ int DimLayout()
         center.m_dY + dRad*(cos(endAng)*xAx.m_dY + sin(endAng)*yAx.m_dY),
         center.m_dZ + dRad*(cos(endAng)*xAx.m_dZ + sin(endAng)*yAx.m_dZ));
 
+    // A line whose endpoint matches BOTH T1 and T2 within tolerance must not be
+    // assigned to either slot - that's the exact failure mode the diagnostic
+    // below exists to catch (line 2's dimension coming out identical to line
+    // 1's), so guard against it here instead of only detecting it after the fact.
     CKSEntity lineAtT1, lineAtT2;
     for(size_t i = 0; i < lines.size(); ++i)
         {
         CKSCoord ls, le; if(part.GetLine(lines[i], NULL, ls, le) != CK_NOERROR) continue;
-        if(!lineAtT1.IsValid() && (Dist3D(ls,T1)<kEndpointTol || Dist3D(le,T1)<kEndpointTol)) lineAtT1=lines[i];
-        if(!lineAtT2.IsValid() && (Dist3D(ls,T2)<kEndpointTol || Dist3D(le,T2)<kEndpointTol)) lineAtT2=lines[i];
+        bool matchT1 = Dist3D(ls,T1)<kEndpointTol || Dist3D(le,T1)<kEndpointTol;
+        bool matchT2 = Dist3D(ls,T2)<kEndpointTol || Dist3D(le,T2)<kEndpointTol;
+        if(matchT1 && matchT2) continue;
+        if(!lineAtT1.IsValid() && matchT1) lineAtT1=lines[i];
+        if(!lineAtT2.IsValid() && matchT2) lineAtT2=lines[i];
         }
 
     // DIAGNOSTIC (temporary): the 2nd linear dimension has come out identical to
